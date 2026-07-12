@@ -351,7 +351,7 @@ async def _xbit_download(link: str, media_type: str) -> str | None:
     GET {YTPROXY_URL}/info/<video_id>  →  audio_url / video_url  →  stream download.
     Returns local file path on success, None on failure.
     """
-    if not YTPROXY_URL or not YT_API_KEY:
+    if not YTPROXY_URL:
         return None
 
     video_id = _extract_video_id(link)
@@ -367,9 +367,10 @@ async def _xbit_download(link: str, media_type: str) -> str | None:
         return file_path
 
     headers = {
-        "x-api-key": str(YT_API_KEY),
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
+    if YT_API_KEY:
+        headers["x-api-key"] = str(YT_API_KEY)
 
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -495,7 +496,9 @@ async def _download_with_fallback(
     Try all downloaders in priority order:
       1. Cookies Base64 (yt-dlp + COOKIES_DATA)
       2. Railway YT API
-      3. yt-dlp without cookies (local download fallback)
+      3. Shruti API
+      4. xBit / YTPROXY API
+      5. yt-dlp without cookies (local download fallback)
     Returns (file_path, downloader_name)
     """
     video_id = _extract_video_id(link) or link
@@ -510,7 +513,17 @@ async def _download_with_fallback(
     if result:
         return result, "railway"
 
-    # 3. yt-dlp without cookies (local download fallback)
+    # 3. Shruti API
+    result = await _shruti_download(video_id, media_type)
+    if result:
+        return result, "shruti"
+
+    # 4. xBit / YTPROXY API
+    result = await _xbit_download(link, media_type)
+    if result:
+        return result, "xbit"
+
+    # 5. yt-dlp without cookies (local download fallback)
     result = await _ytdlp_nocookie_download(link, media_type)
     if result:
         return result, "ytdlp"
