@@ -28,7 +28,9 @@ class MongoDB:
         self.loop = {}
         self.notified = []
         self.cache = self.db.cache
-        self.logger = False
+        # Default: logger is ON whenever LOGGER_ID is configured. The value is
+        # overwritten by get_logger() at boot if a persisted setting exists.
+        self.logger = bool(config.LOGGER_ID)
 
         self.assistant = {}
         self.assistantdb = self.db.assistant
