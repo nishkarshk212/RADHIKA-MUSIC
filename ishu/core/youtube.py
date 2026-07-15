@@ -39,6 +39,10 @@ RAILWAY_YT_API_KEY  = getattr(config, "RAILWAY_YT_API_KEY",  None)
 YTPROXY_URL         = getattr(config, "YTPROXY_URL",         None)
 YT_API_KEY          = getattr(config, "YT_API_KEY",          None)
 
+# Forward proxy for googlevideo media fetches (solves YouTube 403 on flagged
+# egress IPs). socks5h:// = resolve DNS through the proxy (VPS has no IPv6).
+STREAM_PROXY_URL    = getattr(config, "STREAM_PROXY_URL",    "") or None
+
 DOWNLOAD_DIR        = "downloads"
 
 # Per-video_id locks so the foreground download() and the background prefetch
@@ -137,6 +141,19 @@ def _with_js_runtime(opts: dict) -> dict:
     out = dict(opts)
     out["js_runtimes"] = JS_RUNTIMES
     return out
+
+
+# ── Forward proxy ──────────────────────────────────────────────────────────────
+def _proxy_opt() -> dict:
+    """
+    Return a yt-dlp proxy option dict if STREAM_PROXY_URL is configured.
+
+    YouTube returns 403 when media is fetched from the bot's flagged egress IP.
+    Routing the googlevideo fetch through a forward proxy (VPS SOCKS5) fixes it.
+    socks5h:// forces DNS resolution through the proxy because the proxy host
+    has no IPv6 route (plain socks5:// fails with "Network unreachable").
+    """
+    return {"proxy": STREAM_PROXY_URL} if STREAM_PROXY_URL else {}
 
 
 # ── Cookie helper ─────────────────────────────────────────────────────────────
@@ -241,6 +258,7 @@ async def _cookies_download(link: str, media_type: str) -> str | None:
                     "no_warnings":         True,
                     "cookiefile":          cookie,
                     "merge_output_format": "mp4",
+                    **_proxy_opt(),
                 }
             else:
                 ydl_opts = {
@@ -249,6 +267,7 @@ async def _cookies_download(link: str, media_type: str) -> str | None:
                     "quiet":        True,
                     "no_warnings":  True,
                     "cookiefile":   cookie,
+                    **_proxy_opt(),
                     "postprocessors": [{
                         "key":              "FFmpegExtractAudio",
                         "preferredcodec":   "mp3",
@@ -494,6 +513,7 @@ async def _ytdlp_nocookie_download(link: str, media_type: str) -> str | None:
                     "quiet":               True,
                     "no_warnings":         True,
                     "merge_output_format": "mp4",
+                    **_proxy_opt(),
                 }
             else:
                 ydl_opts = {
@@ -501,6 +521,7 @@ async def _ytdlp_nocookie_download(link: str, media_type: str) -> str | None:
                     "outtmpl":      outtmpl,
                     "quiet":        True,
                     "no_warnings":  True,
+                    **_proxy_opt(),
                     "postprocessors": [{
                         "key":              "FFmpegExtractAudio",
                         "preferredcodec":   "mp3",
@@ -874,9 +895,12 @@ class YouTube:
         if videoid:
             link = self.base + link
         link = _normalize_youtube_link(link)
+        cmd = ["yt-dlp", "--js-runtimes", "node", "-g"]
+        if STREAM_PROXY_URL:
+            cmd += ["--proxy", STREAM_PROXY_URL]
+        cmd += ["-f", "best[height<=?720][width<=?1280]", link]
         proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "--js-runtimes", "node", "-g",
-            "-f", "best[height<=?720][width<=?1280]", link,
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -913,6 +937,7 @@ class YouTube:
                 ),
                 "quiet":       True,
                 "no_warnings": True,
+                **_proxy_opt(),
             }
             ydl_opts = _with_js_runtime(ydl_opts)
             if cookie:

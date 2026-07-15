@@ -35,6 +35,11 @@ class Config:
         # Shruti API — Primary download source (get key from @SHRUTIAPIBOT)
         self.SHRUTI_API_URL = getenv("SHRUTI_API_URL", "http://api01.shrutibots.site")
         self.SHRUTI_API_KEY = getenv("SHRUTI_API_KEY", "")
+
+        # Forward proxy used to fetch googlevideo media so YouTube doesn't
+        # 403 the bot's (flagged) deployment egress IP. Use socks5h:// so DNS
+        # is resolved through the proxy (the proxy host has no IPv6 route).
+        self.STREAM_PROXY_URL = getenv("STREAM_PROXY_URL", "")
         
         self.AUTO_LEAVE: bool = getenv("AUTO_LEAVE", "False").lower() == "true"
         self.AUTO_END: bool = getenv("AUTO_END", "False").lower() == "true"

@@ -100,14 +100,23 @@ class TgCall(PyTgCalls):
         ) if config.THUMB_GEN else None
 
         # ── Step 1: Resolve media path (prefer stream URL for instant play) ───
-        media_path = media.stream_url or media.file_path
-        used_stream = bool(media.stream_url)
+        # When STREAM_PROXY_URL is set, PyTgCalls can't proxy the direct
+        # googlevideo stream URL (MediaStream has no proxy param), so it would
+        # 403 on the bot's flagged egress IP. Go straight to the proxied
+        # yt-dlp download instead — it's fetched through the forward proxy.
+        _stream_proxy = getattr(config, "STREAM_PROXY_URL", "")
+        media_path = media.file_path or (None if _stream_proxy else media.stream_url)
+        used_stream = bool(media.stream_url) and not _stream_proxy
 
         if not media_path and isinstance(media, Track):
-            media_path = await yt.get_stream_url(media.id, video=media.video)
-            if media_path:
-                media.stream_url = media_path
-                used_stream = True
+            if _stream_proxy:
+                media.file_path = await yt.download(media.id, video=media.video)
+                media_path = media.file_path
+            else:
+                media.stream_url = await yt.get_stream_url(media.id, video=media.video)
+                if media.stream_url:
+                    media_path = media.stream_url
+                    used_stream = True
 
         # ── Step 2: Attempt playback ──────────────────────────────────────────
         stream_success = False
@@ -281,10 +290,15 @@ class TgCall(PyTgCalls):
 
         # ── Resolve playback source for the next track ────────────────────────
         # Priority: existing file_path → existing stream_url → get stream URL
+        # When STREAM_PROXY_URL is set, prefer the proxied yt-dlp download over
+        # the direct (un-proxiable) stream URL to avoid the googlevideo 403.
+        _stream_proxy = getattr(config, "STREAM_PROXY_URL", "")
         if not media.file_path and not media.stream_url:
             fname = f"downloads/{media.id}.{'mp4' if media.video else 'mp3'}"
             if Path(fname).exists():
                 media.file_path = fname
+            elif _stream_proxy:
+                media.file_path = await yt.download(media.id, video=media.video)
             else:
                 # Try fast stream URL first
                 media.stream_url = await yt.get_stream_url(media.id, video=media.video)
