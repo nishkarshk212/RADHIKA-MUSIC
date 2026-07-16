@@ -53,6 +53,18 @@ DOWNLOAD_DIR        = "downloads"
 _dl_locks: "dict[str, asyncio.Lock]" = {}
 
 
+# A real YouTube video id is exactly 11 chars from [A-Za-z0-9_-].
+# JioSaavn / lily track ids are 8-10 chars and MUST NOT be fed into the
+# YouTube download chain — doing so produces "Incomplete YouTube ID" errors
+# and wastes bot-check quota on yt-dlp. Guard with this before any fetch.
+_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def _is_youtube_id(video_id: str) -> bool:
+    """Return True only if ``video_id`` looks like a real 11-char YouTube id."""
+    return bool(video_id) and _YT_ID_RE.match(str(video_id)) is not None
+
+
 # Download context used to enrich the error-log message sent to the log group.
 # play.py / calls.py set this right before triggering a foreground download so
 # that a failure can be reported with the group + song details.
@@ -975,6 +987,14 @@ class YouTube:
         """
         link = _normalize_youtube_link(video_id, self.base)
 
+        # Guard: JioSaavn / lily track ids are not YouTube ids. Don't hand
+        # them to yt-dlp / Railway (they return "Incomplete YouTube ID" / 500).
+        if not _is_youtube_id(video_id):
+            logger.warning(
+                "get_stream_url skipped for non-YouTube id: %r", video_id
+            )
+            return None
+
         # ── Method 1: yt-dlp with cookies base64 ─────────────────────────────
         try:
             cookie = cookie_txt_file()
@@ -1072,6 +1092,16 @@ class YouTube:
         """
         self.dl_stats["total_requests"] += 1
         link = _normalize_youtube_link(video_id, self.base)
+
+        # Guard: lily/JioSaavn results carry their own track id (8-10 chars),
+        # not a YouTube id. If there's a working stream_url already (JioSaavn
+        # CDN link) the caller should use it directly; never run the YT
+        # download chain on a non-YouTube id (wastes quota, floods the log).
+        if not _is_youtube_id(video_id):
+            logger.warning(
+                "YouTube.download skipped for non-YouTube id: %r", video_id
+            )
+            return None
 
         try:
             result, downloader = await _download_with_fallback(

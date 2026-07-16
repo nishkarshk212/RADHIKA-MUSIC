@@ -44,7 +44,12 @@ class Config:
         self.LILY_API_KEY = getenv("LILY_API_KEY", "")
         self.LILY_API_FALLBACK_URL = getenv("LILY_API_FALLBACK_URL", "")
         self.LILY_API_FALLBACK_KEY = getenv("LILY_API_FALLBACK_KEY", "")
-        self.LILY_API_PLATFORM = getenv("LILY_API_PLATFORM", "jiosaavn")
+        # Default to "youtube": the lily /search/all "jiosaavn" platform
+        # returns 8-10 char JioSaavn track ids (not YouTube ids), which then
+        # get fed into the YT download chain and fail with "Incomplete YouTube
+        # ID". The "youtube" platform returns real 11-char YouTube ids whose
+        # stream_url/audio can actually be fetched. Override via env if needed.
+        self.LILY_API_PLATFORM = getenv("LILY_API_PLATFORM", "youtube")
 
         # Forward proxy used to fetch googlevideo media so YouTube doesn't
         # 403 the bot's (flagged) deployment egress IP. Use socks5h:// so DNS
