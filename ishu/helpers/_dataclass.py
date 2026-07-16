@@ -37,3 +37,4 @@ class Track:
     user: str = None
     view_count: str = None
     video: bool = False
+    source: str = None

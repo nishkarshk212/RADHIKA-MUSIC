@@ -36,6 +36,16 @@ class Config:
         self.SHRUTI_API_URL = getenv("SHRUTI_API_URL", "http://api01.shrutibots.site")
         self.SHRUTI_API_KEY = getenv("SHRUTI_API_KEY", "")
 
+        # ── Lily API (lily-api-hub) ──────────────────────────────────────────
+        # Get key + URL from https://github.com/nishkarshk212/lily-api-hub
+        # Primary music source: /search/all returns a ready-to-stream JioSaavn
+        # URL (no local download). /play?type=video returns a direct mp4.
+        self.LILY_API_URL = getenv("LILY_API_URL", "https://youtube-api-saas-backend.onrender.com")
+        self.LILY_API_KEY = getenv("LILY_API_KEY", "")
+        self.LILY_API_FALLBACK_URL = getenv("LILY_API_FALLBACK_URL", "")
+        self.LILY_API_FALLBACK_KEY = getenv("LILY_API_FALLBACK_KEY", "")
+        self.LILY_API_PLATFORM = getenv("LILY_API_PLATFORM", "jiosaavn")
+
         # Forward proxy used to fetch googlevideo media so YouTube doesn't
         # 403 the bot's (flagged) deployment egress IP. Use socks5h:// so DNS
         # is resolved through the proxy (the proxy host has no IPv6 route).

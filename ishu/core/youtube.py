@@ -27,6 +27,7 @@ from pyrogram.enums import MessageEntityType
 from pyrogram.types import Message
 
 from ishu import config, logger
+from ishu.core.lily import LilyApi, mask_key
 from ishu.helpers import utils
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -615,6 +616,26 @@ class YouTube:
         self.api      = None
         self.cookies_dir = os.path.join(os.path.dirname(__file__), "..", "cookies")
 
+        # ── Lily API (lily-api-hub) ───────────────────────────────────────────
+        # Primary audio source: /search/all -> direct JioSaavn stream URL
+        # (no local download). Fail fast so a slow/down provider falls through.
+        self.lily = LilyApi(
+            config.LILY_API_URL,
+            config.LILY_API_KEY,
+            name="lily",
+            platform=config.LILY_API_PLATFORM,
+            retries=1,
+            timeout=15,
+        )
+        self.lily_fallback = LilyApi(
+            config.LILY_API_FALLBACK_URL,
+            config.LILY_API_FALLBACK_KEY,
+            name="nexgen",
+            platform=config.LILY_API_PLATFORM,
+            retries=1,
+            timeout=8,
+        )
+
         # Decode COOKIES_DATA (base64) env var → cookie_0.txt for yt-dlp use
         cookies_data = getattr(config, "COOKIES_DATA", None) or os.environ.get("COOKIES_DATA")
         if cookies_data:
@@ -764,6 +785,33 @@ class YouTube:
         Prioritizes official studio versions, avoids remixes/covers/live etc.
         """
         from ishu.helpers._dataclass import Track
+
+        # Prefer lily/JioSaavn for audio text queries: it returns a ready
+        # stream URL, so playback needs no separate download step. Skip it
+        # for video (audio-only source) and for YouTube URLs.
+        if not video and not self.valid(query):
+            item = await self.lily.search(query)
+            source = "lily" if item else None
+            if not item:
+                item = await self.lily_fallback.search(query)
+                if item:
+                    source = "nexgen"
+            if item and item.get("stream_url"):
+                dur = int(float(item.get("duration") or 0))
+                track = Track(
+                    id=item.get("id"),
+                    channel_name=item.get("artists"),
+                    duration=f"{dur // 60}:{dur % 60:02d}",
+                    duration_sec=dur,
+                    message_id=message_id,
+                    title=(item.get("title") or "")[:25],
+                    thumbnail=item.get("thumbnail"),
+                    url=item.get("url"),
+                    stream_url=item.get("stream_url"),
+                    video=False,
+                    source=source,
+                )
+                return track
 
         avoid_keywords = [
             "remix", "cover", "live", "slowed", "reverb", "extended", "acoustic",
@@ -1091,3 +1139,40 @@ class YouTube:
                 channel_name = channel_name,
             ))
         return tracks
+
+    # ── Lily video resolve (lily-api-hub /play?type=video) ───────────────────
+    async def resolve_video(
+        self, video_id: str, m_id: int = 0, platform: str = "youtube"
+    ):
+        """Resolve a video id to a direct, streamable URL via lily ``/play``.
+
+        Returns a ``Track`` with ``file_path`` set to the direct mp4 URL (so
+        playback streams without a local download), or ``None`` on failure
+        so the caller can fall back to ``download()``.
+        """
+        from ishu.core.lily import resolve_video as _resolve
+        from ishu.helpers._dataclass import Track
+
+        if not config.LILY_API_KEY or not config.LILY_API_URL:
+            return None
+        track = await _resolve(
+            video_id,
+            m_id,
+            platform,
+            api_url=config.LILY_API_URL,
+            api_key=config.LILY_API_KEY,
+        )
+        if track is not None:
+            track.source = "lily"
+        return track
+
+    async def close(self) -> None:
+        """Close lily API sessions on shutdown."""
+        try:
+            await self.lily.close()
+        except Exception:
+            pass
+        try:
+            await self.lily_fallback.close()
+        except Exception:
+            pass

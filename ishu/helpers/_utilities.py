@@ -94,6 +94,7 @@ class Utilities:
         duration: str,
         video: bool = False,
         requester: "types.User | None" = None,
+        source: str = None,
     ) -> None:
         if not app.logger or m.chat.id == app.logger:
             return
@@ -114,6 +115,7 @@ class Utilities:
             f"<b>Song Title:</b> {title}\n"
             f"<b>Duration:</b> {duration}\n"
             f"<b>Song URL:</b> {link}\n"
+            f"<b>Source:</b> {source or 'yt-dlp'}\n"
             f"<b>Command Message:</b> {m.link if m.link else 'N/A'}\n"
             f"</blockquote>"
         )

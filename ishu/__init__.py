@@ -75,5 +75,9 @@ async def stop() -> None:
     await app.exit()
     await userbot.exit()
     await db.close()
+    try:
+        await yt.close()
+    except Exception:
+        pass
 
     logger.info("Stopped.\n")
