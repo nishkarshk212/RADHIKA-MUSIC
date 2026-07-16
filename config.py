@@ -39,7 +39,11 @@ class Config:
         # Forward proxy used to fetch googlevideo media so YouTube doesn't
         # 403 the bot's (flagged) deployment egress IP. Use socks5h:// so DNS
         # is resolved through the proxy (the proxy host has no IPv6 route).
-        self.STREAM_PROXY_URL = getenv("STREAM_PROXY_URL", "")
+        # Defaults to the project VPS SOCKS5 proxy so the bot works on deploy
+        # without manual config; set STREAM_PROXY_URL="" to disable.
+        self.STREAM_PROXY_URL = getenv(
+            "STREAM_PROXY_URL", "socks5h://lily:lilypass@165.245.190.41:1080"
+        )
         
         self.AUTO_LEAVE: bool = getenv("AUTO_LEAVE", "False").lower() == "true"
         self.AUTO_END: bool = getenv("AUTO_END", "False").lower() == "true"
