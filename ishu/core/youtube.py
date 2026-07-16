@@ -2,19 +2,16 @@
 # Licensed under the MIT License.
 # This file is part of AnonXMusic
 #
-# Download chain (in order of priority):
+# Download chain (in order of priority — 3 sources only):
 #   1. Cookies Base64  (COOKIES_DATA env var → yt-dlp with cookie_0.txt)
 #   2. Railway YT API  (RAILWAY_YT_API_URL / RAILWAY_YT_API_KEY)
-#   3. Shruti API      (SHRUTI_API_URL / SHRUTI_API_KEY)
-#   4. xBit API        (YTPROXY_URL / YT_API_KEY)
-#   5. Lily API        (LILY_API_URL / LILY_API_KEY → /play direct_url; last
-#                       resort, since the googlevideo URL is IP-locked to the
-#                       requester — falls through cleanly if it 403s)
+#   3. Lily API        (LILY_API_URL / LILY_API_KEY → /play direct_url)
 #
 # Stream URL chain (for instant playback without download):
-#   1. yt-dlp --get-url  (uses cookies base64 if available)
-#   2. Railway API       (validated with HEAD request before returning)
-
+#   1. Cookies Base64  (yt-dlp extract_info with cookie_0.txt)
+#   2. Railway API     (validated GET before returning)
+#   3. Lily API        (/play direct_url; logged so key usage is visible)
+#
 import asyncio
 import glob
 import os
@@ -34,16 +31,10 @@ from ishu.core.lily import LilyApi, mask_key
 from ishu.helpers import utils
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SHRUTI_API_URL      = getattr(config, "SHRUTI_API_URL",      "https://api.shrutibots.site")
-SHRUTI_API_KEY      = getattr(config, "SHRUTI_API_KEY",      None)
-
 RAILWAY_YT_API_URL  = getattr(config, "RAILWAY_YT_API_URL",  None)
 RAILWAY_YT_API_KEY  = getattr(config, "RAILWAY_YT_API_KEY",  None)
 
-YTPROXY_URL         = getattr(config, "YTPROXY_URL",         None)
-YT_API_KEY          = getattr(config, "YT_API_KEY",          None)
-
-# Lily API (lily-api-hub) — used both for search and as a download fallback.
+# Lily API (lily-api-hub) — used both for search and as a download/stream fallback.
 # /play?type=audio&platform=youtube&id=<id> returns a googlevideo direct_url
 # (issued to THIS host's IP, so a local download succeeds).
 LILY_API_URL            = getattr(config, "LILY_API_URL",            None)
@@ -379,203 +370,10 @@ async def _railway_download(video_id: str, media_type: str) -> str | None:
         return None
 
 
-# ── Downloader 3: Shruti API ──────────────────────────────────────────────────
-async def _shruti_download(video_id: str, media_type: str) -> str | None:
-    """
-    Priority 3: Download via Shruti API.
-    GET {SHRUTI_API_URL}/download?url=<video_id>&type=audio|video&api_key=<key>
-    Returns local file path on success, None on failure.
-    """
-    if not SHRUTI_API_KEY:
-        return None
-
-    ext         = "mp4" if media_type == "video" else "mp3"
-    timeout_dl  = 600   if media_type == "video" else 300
-    file_path   = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
-
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-        return file_path
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{SHRUTI_API_URL}/download",
-                params={"url": video_id, "type": media_type, "api_key": SHRUTI_API_KEY},
-                timeout=aiohttp.ClientTimeout(total=timeout_dl),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("Shruti API status %s for %s", resp.status, video_id)
-                    return None
-                with open(file_path, "wb") as fobj:
-                    async for chunk in resp.content.iter_chunked(131072):
-                        fobj.write(chunk)
-
-        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            logger.info("Shruti API ✓ %s → %s", video_id, file_path)
-            return file_path
-
-        return None
-
-    except Exception as exc:
-        logger.warning("Shruti API error for %s: %s", video_id, exc)
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except OSError:
-            pass
-        return None
-
-
-# ── Downloader 4: xBit API ────────────────────────────────────────────────────
-async def _xbit_download(link: str, media_type: str) -> str | None:
-    """
-    Priority 4: Download via xBit / YTPROXY API.
-    GET {YTPROXY_URL}/info/<video_id>  →  audio_url / video_url  →  stream download.
-    Returns local file path on success, None on failure.
-    """
-    if not YTPROXY_URL:
-        return None
-
-    video_id = _extract_video_id(link)
-    if not video_id or len(video_id) < 3:
-        return None
-
-    ext         = "mp4" if media_type == "video" else "mp3"
-    timeout_dl  = 600   if media_type == "video" else 300
-    file_path   = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
-
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-        return file_path
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    }
-    if YT_API_KEY:
-        headers["x-api-key"] = str(YT_API_KEY)
-
-    try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(
-                f"{YTPROXY_URL}/info/{video_id}",
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("xBit info failed: status %s", resp.status)
-                    return None
-                try:
-                    data = await resp.json(content_type=None)
-                except Exception as e:
-                    logger.warning("xBit info returned invalid JSON: %s", e)
-                    return None
-
-            if data.get("status") != "success":
-                logger.warning("xBit API error: %s", data.get("message", "unknown"))
-                return None
-
-            media_url = (
-                data.get("video_url") if media_type == "video" else data.get("audio_url")
-            )
-            if not media_url:
-                logger.warning("xBit: no %s_url in response", media_type)
-                return None
-
-            async with session.get(
-                media_url,
-                timeout=aiohttp.ClientTimeout(total=timeout_dl),
-                allow_redirects=True,
-            ) as file_resp:
-                if file_resp.status != 200:
-                    return None
-                with open(file_path, "wb") as fobj:
-                    async for chunk in file_resp.content.iter_chunked(1024 * 1024):
-                        fobj.write(chunk)
-
-        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            logger.info("xBit API ✓ %s → %s", video_id, file_path)
-            return file_path
-
-        return None
-
-    except Exception as exc:
-        logger.warning("xBit download failed for %s: %s", video_id, exc)
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except OSError:
-            pass
-        return None
-
-
-# ── Downloader 5: yt-dlp without cookies (last resort) ───────────────────────
-async def _ytdlp_nocookie_download(link: str, media_type: str) -> str | None:
-    """
-    Last-resort local yt-dlp download without any cookies.
-    Used only when no cookie file is available.
-    Returns local file path or None.
-    """
-    video_id  = _extract_video_id(link) or link
-    ext       = "mp4" if media_type == "video" else "mp3"
-    file_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
-
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-    async with _dl_lock(video_id):
-        existing = _resolve_downloaded_file(video_id, ext)
-        if existing:
-            return existing
-
-        try:
-            # Bare template ending in '.%(ext)s' so the postprocessor produces
-            # downloads/<id>.mp3 (not <id>.mp3.mp3).
-            outtmpl = os.path.join(DOWNLOAD_DIR, f"{video_id}.%(ext)s")
-            if media_type == "video":
-                ydl_opts = {
-                    "format":              "bestvideo[height<=720]+bestaudio/best[height<=720]",
-                    "outtmpl":             outtmpl,
-                    "quiet":               True,
-                    "no_warnings":         True,
-                    "merge_output_format": "mp4",
-                    **_proxy_opt(),
-                }
-            else:
-                ydl_opts = {
-                    "format":       "bestaudio/best",
-                    "outtmpl":      outtmpl,
-                    "quiet":        True,
-                    "no_warnings":  True,
-                    **_proxy_opt(),
-                    "postprocessors": [{
-                        "key":              "FFmpegExtractAudio",
-                        "preferredcodec":   "mp3",
-                        "preferredquality": "192",
-                    }],
-                }
-
-            loop = asyncio.get_event_loop()
-            def _run():
-                with yt_dlp.YoutubeDL(_with_js_runtime(ydl_opts)) as ydl:
-                    ydl.download([_normalize_youtube_link(link)])
-
-            await loop.run_in_executor(None, _run)
-
-            result = _resolve_downloaded_file(video_id, ext)
-            if result:
-                logger.info("yt-dlp (no-cookie) ✓ %s → %s", video_id, result)
-                return result
-
-            return None
-
-        except Exception as exc:
-            logger.warning("yt-dlp (no-cookie) download failed for %s: %s", video_id, exc)
-            return None
-
-
-# ── Downloader 6: Lily API (/play?type=audio) ──────────────────────────────
+# ── Downloader 3: Lily API (/play?type=audio) ──────────────────────────────
 async def _lily_download(video_id: str, media_type: str) -> str | None:
     """
-    Priority 6: Download via Lily API (lily-api-hub).
+    Priority 3: Download via Lily API (lily-api-hub).
 
     GET {LILY_API_URL}/play?type=audio&platform=youtube&id=<video_id>&api_key=<key>
     returns a googlevideo direct_url. We GET that URL and write it to a local
@@ -672,13 +470,11 @@ async def _download_with_fallback(
     media_type: str,
 ) -> tuple[str | None, str]:
     """
-    Try all downloaders in priority order:
-      1. Cookies Base64 (yt-dlp + COOKIES_DATA)
-      2. Railway YT API
-      3. Shruti API
-      4. xBit / YTPROXY API
-      5. yt-dlp without cookies (local download fallback)
-    Returns (file_path, downloader_name)
+    Download chain (only 3 sources, in priority order):
+      1. Cookies Base64  (COOKIES_DATA env var → yt-dlp with cookie_0.txt)
+      2. Railway YT API  (RAILWAY_YT_API_URL / RAILWAY_YT_API_KEY)
+      3. Lily API        (LILY_API_URL / LILY_API_KEY → /play direct_url)
+    Returns (file_path, downloader_name).
     """
     video_id = _extract_video_id(link) or link
 
@@ -692,22 +488,7 @@ async def _download_with_fallback(
     if result:
         return result, "railway"
 
-    # 3. Shruti API
-    result = await _shruti_download(video_id, media_type)
-    if result:
-        return result, "shruti"
-
-    # 4. xBit / YTPROXY API
-    result = await _xbit_download(link, media_type)
-    if result:
-        return result, "xbit"
-
-    # 5. yt-dlp without cookies (local download fallback)
-    result = await _ytdlp_nocookie_download(link, media_type)
-    if result:
-        return result, "ytdlp"
-
-    # 6. Lily API (/play -> googlevideo direct_url download)
+    # 3. Lily API (/play -> googlevideo direct_url download)
     result = await _lily_download(video_id, media_type)
     if result:
         return result, "lily"
@@ -775,10 +556,7 @@ class YouTube:
             "total_requests": 0,
             "cookies_b64":    0,
             "railway":        0,
-            "shruti":         0,
-            "xbit":           0,
-            "ytdlp":          0,
-            "lily":          0,
+            "lily":           0,
             "existing_files": 0,
             "failed":         0,
         }
@@ -1183,6 +961,37 @@ class YouTube:
             except Exception as e:
                 logger.warning("Railway get_stream_url failed: %s", e)
 
+        # ── Method 3: Lily API (/play?type=...&platform=youtube) ────────────
+        if LILY_API_URL and LILY_API_KEY:
+            try:
+                params = {
+                    "type":     "video" if video else "audio",
+                    "platform": "youtube",
+                    "id":       video_id,
+                    "api_key":  LILY_API_KEY,
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{LILY_API_URL.rstrip('/')}/play",
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(total=20),
+                    ) as resp:
+                        if resp.status != 200:
+                            logger.warning(
+                                "Lily get_stream_url status %s for %s",
+                                resp.status, video_id,
+                            )
+                        else:
+                            data = await resp.json(content_type=None)
+                            if data.get("success") and data.get("direct_url"):
+                                logger.info("Stream URL via Lily API: %s", video_id)
+                                return data["direct_url"]
+                            logger.warning(
+                                "Lily get_stream_url: no direct_url for %s", video_id
+                            )
+            except Exception as e:
+                logger.warning("Lily get_stream_url failed: %s", e)
+
         return None
 
     # ── Download (main method called by play.py / calls.py) ──────────────────
@@ -1193,12 +1002,10 @@ class YouTube:
         title: str | None = None,
     ) -> str | None:
         """
-        Download audio/video by video_id using the full fallback chain:
+        Download audio/video by video_id using the 3-source fallback chain:
           1. Cookies Base64 (yt-dlp + COOKIES_DATA)
           2. Railway YT API
-          3. Shruti API
-          4. xBit API
-          5. yt-dlp without cookies
+          3. Lily API (/play direct_url)
         Returns file path or None.
         """
         self.dl_stats["total_requests"] += 1
