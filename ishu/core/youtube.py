@@ -7,6 +7,9 @@
 #   2. Railway YT API  (RAILWAY_YT_API_URL / RAILWAY_YT_API_KEY)
 #   3. Shruti API      (SHRUTI_API_URL / SHRUTI_API_KEY)
 #   4. xBit API        (YTPROXY_URL / YT_API_KEY)
+#   5. Lily API        (LILY_API_URL / LILY_API_KEY → /play direct_url; last
+#                       resort, since the googlevideo URL is IP-locked to the
+#                       requester — falls through cleanly if it 403s)
 #
 # Stream URL chain (for instant playback without download):
 #   1. yt-dlp --get-url  (uses cookies base64 if available)
@@ -39,6 +42,14 @@ RAILWAY_YT_API_KEY  = getattr(config, "RAILWAY_YT_API_KEY",  None)
 
 YTPROXY_URL         = getattr(config, "YTPROXY_URL",         None)
 YT_API_KEY          = getattr(config, "YT_API_KEY",          None)
+
+# Lily API (lily-api-hub) — used both for search and as a download fallback.
+# /play?type=audio&platform=youtube&id=<id> returns a googlevideo direct_url
+# (issued to THIS host's IP, so a local download succeeds).
+LILY_API_URL            = getattr(config, "LILY_API_URL",            None)
+LILY_API_KEY            = getattr(config, "LILY_API_KEY",            None)
+LILY_API_FALLBACK_URL   = getattr(config, "LILY_API_FALLBACK_URL",   None)
+LILY_API_FALLBACK_KEY   = getattr(config, "LILY_API_FALLBACK_KEY",   None)
 
 # Forward proxy for googlevideo media fetches (solves YouTube 403 on flagged
 # egress IPs). socks5h:// = resolve DNS through the proxy (VPS has no IPv6).
@@ -561,6 +572,100 @@ async def _ytdlp_nocookie_download(link: str, media_type: str) -> str | None:
             return None
 
 
+# ── Downloader 6: Lily API (/play?type=audio) ──────────────────────────────
+async def _lily_download(video_id: str, media_type: str) -> str | None:
+    """
+    Priority 6: Download via Lily API (lily-api-hub).
+
+    GET {LILY_API_URL}/play?type=audio&platform=youtube&id=<video_id>&api_key=<key>
+    returns a googlevideo direct_url. We GET that URL and write it to a local
+    file. The direct_url is IP-locked to THIS host, so a local download is the
+    reliable way to use lily (streaming it elsewhere may 403).
+
+    Falls back to a secondary Lily instance if configured.
+    """
+    if not _is_youtube_id(video_id):
+        return None
+
+    ext      = "mp4" if media_type == "video" else "mp3"
+    file_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
+
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+        return file_path
+
+    endpoints = [
+        (LILY_API_URL, LILY_API_KEY),
+        (LILY_API_FALLBACK_URL, LILY_API_FALLBACK_KEY),
+    ]
+
+    for base, key in endpoints:
+        if not base or not key:
+            continue
+        try:
+            params = {
+                "type":     "video" if media_type == "video" else "audio",
+                "platform": "youtube",
+                "id":       video_id,
+                "api_key":  key,
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base.rstrip('/')}/play",
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "Lily /play status %s for %s", resp.status, video_id
+                        )
+                        continue
+                    try:
+                        data = await resp.json(content_type=None)
+                    except Exception as e:
+                        logger.warning("Lily /play returned invalid JSON: %s", e)
+                        continue
+
+                if not (data.get("success") and data.get("direct_url")):
+                    logger.warning(
+                        "Lily /play returned no direct_url for %s", video_id
+                    )
+                    continue
+
+                media_url = data["direct_url"]
+                # Download the googlevideo URL to a local file.
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        media_url,
+                        timeout=aiohttp.ClientTimeout(total=600 if media_type == "video" else 300),
+                        allow_redirects=True,
+                    ) as file_resp:
+                        if file_resp.status != 200:
+                            logger.warning(
+                                "Lily direct_url GET status %s for %s",
+                                file_resp.status,
+                                video_id,
+                            )
+                            continue
+                        with open(file_path, "wb") as fobj:
+                            async for chunk in file_resp.content.iter_chunked(1024 * 1024):
+                                fobj.write(chunk)
+
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    logger.info("Lily API ✓ %s → %s", video_id, file_path)
+                    return file_path
+
+        except Exception as exc:
+            logger.warning("Lily download failed for %s: %s", video_id, exc)
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except OSError:
+                pass
+
+    return None
+
+
 # ── Main download entrypoint ──────────────────────────────────────────────────
 async def _download_with_fallback(
     link: str,
@@ -601,6 +706,11 @@ async def _download_with_fallback(
     result = await _ytdlp_nocookie_download(link, media_type)
     if result:
         return result, "ytdlp"
+
+    # 6. Lily API (/play -> googlevideo direct_url download)
+    result = await _lily_download(video_id, media_type)
+    if result:
+        return result, "lily"
 
     logger.error("All download methods failed for: %s", video_id)
     await _notify_download_failure(video_id, media_type)
@@ -668,6 +778,7 @@ class YouTube:
             "shruti":         0,
             "xbit":           0,
             "ytdlp":          0,
+            "lily":          0,
             "existing_files": 0,
             "failed":         0,
         }
